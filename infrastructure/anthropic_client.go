@@ -73,19 +73,13 @@ func (a *AnthropicClient) RunInference(ctx context.Context, conversation []anthr
 
 	message, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.ModelClaude3_7SonnetLatest,
-		MaxTokens: int64(1024),
+		MaxTokens: int64(4096),
 		Messages:  conversation,
 		Tools:     anthropicTools,
 	})
 
 	if err != nil {
 		return nil, err
-	}
-
-	for _, content := range message.Content {
-		if content.Type == "text" {
-			fmt.Printf("\x1b[96mClaude\x1b[0m: %s\n", content.Text)
-		}
 	}
 
 	return message, nil

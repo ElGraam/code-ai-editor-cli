@@ -74,6 +74,6 @@ func (p *ConsoleUserMessageProvider) GetUserMessage() (string, bool) {
 //
 //	An error if the chatbot fails to start.
 func (s *ChatbotService) StartChatbot(ctx context.Context) error {
-	fmt.Println("Chat with Claude (use 'ctrl-c' to quit)")
+	fmt.Println("Chat with Claude (use 'Ctrl+C' to quit)")
 	return s.agent.Run(ctx)
 }
