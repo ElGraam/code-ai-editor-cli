@@ -3,6 +3,8 @@ package domain
 import (
 	"context"
 	"fmt"
+	"log"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -22,34 +24,50 @@ type AIClient interface {
 }
 
 // Agent orchestrates the interaction between the user, the AI client,
-// and the available tools. It is responsible for receiving user messages,
-// forwarding them to the AI client, and executing tools based on the AI's
-// instructions. The Agent also manages the tool repository and provides
-// user messages to the AI client.
+// and the available tools, potentially using a vector store for context.
 type Agent struct {
 	AIClient            AIClient
 	UserMessageProvider UserMessageProvider
 	ToolRepository      ToolRepository
+	VectorStore         VectorStore     // Added for context retrieval
+	EmbeddingClient     EmbeddingClient // Added for context retrieval
 }
 
-// NewAgent creates a new Agent with the provided AI client, user message provider,
-// and tool repository. It initializes the Agent struct with these dependencies,
-// allowing the agent to interact with the AI, receive user messages, and access
-// available tools.
-//
-// Parameters:
-//   - aiClient: An AIClient instance for interacting with the AI model.
-//   - userMessageProvider: A UserMessageProvider instance for retrieving user messages.
-//   - toolRepository: A ToolRepository instance for accessing available tools.
-//
-// Returns:
-//   - A pointer to a new Agent instance.
-func NewAgent(aiClient AIClient, userMessageProvider UserMessageProvider, toolRepository ToolRepository) *Agent {
+// NewAgent creates a new Agent with the provided dependencies.
+func NewAgent(aiClient AIClient, userMessageProvider UserMessageProvider, toolRepository ToolRepository, vectorStore VectorStore, embeddingClient EmbeddingClient) *Agent {
 	return &Agent{
 		AIClient:            aiClient,
 		UserMessageProvider: userMessageProvider,
 		ToolRepository:      toolRepository,
+		VectorStore:         vectorStore,
+		EmbeddingClient:     embeddingClient,
 	}
+}
+
+const maxContextLength = 1000 // Example: Limit context tokens/chars
+
+// formatSnippets formats retrieved snippets into a string for the prompt context.
+func formatSnippets(snippets []Snippet) string {
+	if len(snippets) == 0 {
+		return ""
+	}
+	var contextBuilder strings.Builder
+	contextBuilder.WriteString("Relevant code snippets based on your query:\n\n")
+	currentLength := 0
+	for _, s := range snippets {
+		snippetHeader := fmt.Sprintf("--- File: %s (Lines: %d-%d) ---\n", s.FilePath, s.StartLine, s.EndLine)
+		snippetContent := fmt.Sprintf("```go\n%s\n```\n\n", s.Content)
+
+		if currentLength+len(snippetHeader)+len(snippetContent) > maxContextLength {
+			contextBuilder.WriteString("... (omitting further snippets due to length limit)\n")
+			break
+		}
+
+		contextBuilder.WriteString(snippetHeader)
+		contextBuilder.WriteString(snippetContent)
+		currentLength += len(snippetHeader) + len(snippetContent)
+	}
+	return contextBuilder.String()
 }
 
 // Run executes the agent's main loop, interacting with the user and the AI client.
@@ -73,19 +91,48 @@ func NewAgent(aiClient AIClient, userMessageProvider UserMessageProvider, toolRe
 func (a *Agent) Run(ctx context.Context) error {
 	conversation := []anthropic.MessageParam{}
 
-	// ReAct loop internal cycle
 	for {
-		// Step 1: Observe - Get user input
+		// Step 1a: Observe - Get user input
 		userInput, ok := a.UserMessageProvider.GetUserMessage()
 		if !ok {
 			break
 		}
 
-		// Add user message to conversation history
-		userMessage := anthropic.NewUserMessage(anthropic.NewTextBlock(userInput))
+		// Step 1b: Context Retrieval
+		var contextCode string
+		if a.VectorStore != nil && a.EmbeddingClient != nil {
+			// Generate embedding for user input
+			log.Println("Generating embedding for user query...")
+			embeddings, err := a.EmbeddingClient.GenerateEmbeddings(ctx, []string{userInput})
+			if err != nil {
+				log.Printf("Warning: Failed to generate embedding for query: %v\n", err)
+				// Continue without context if embedding fails
+			} else if len(embeddings) > 0 {
+				// Query vector store
+				log.Println("Querying vector store for relevant snippets...")
+				const topK = 3 // Number of snippets to retrieve
+				snippets, err := a.VectorStore.Query(ctx, embeddings[0], topK)
+				if err != nil {
+					log.Printf("Warning: Failed to query vector store: %v\n", err)
+					// Continue without context if query fails
+				} else {
+					log.Printf("Retrieved %d snippets from vector store.\n", len(snippets))
+					contextCode = formatSnippets(snippets)
+				}
+			}
+		}
+
+		// Add user message (and context if available) to conversation history
+		messageContent := userInput
+		if contextCode != "" {
+			// Prepend context to the user's message or structure it differently
+			messageContent = fmt.Sprintf("%s\n\nUser Query:\n%s", contextCode, userInput)
+			fmt.Printf("\x1b[32mInjecting Context:\n%s\x1b[0m", contextCode) // Display injected context
+		}
+		userMessage := anthropic.NewUserMessage(anthropic.NewTextBlock(messageContent))
 		conversation = append(conversation, userMessage)
 
-		// ReAct loop internal cycle
+		// Inner ReAct loop (Reason -> Act -> Observe Tool Results)
 		for {
 			// Step 2: Reason - Let the AI infer
 			fmt.Print("\x1b[34mThinking...\x1b[0m\n")
